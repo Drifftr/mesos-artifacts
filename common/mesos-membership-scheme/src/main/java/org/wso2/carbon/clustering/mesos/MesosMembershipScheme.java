@@ -113,6 +113,7 @@ public class MesosMembershipScheme implements HazelcastMembershipScheme {
         log.info(String.format("Creating Mesos DNS client using [Endpoint] %s", mesosDNSEndpoint));
         MesosDNS mesosDNSClient = MesosDNSClient.getInstance(mesosDNSEndpoint);
         for (String marathonAppId : marathonAppIdList) {
+            log.info("Adding Members from AppID : " + marathonAppId);
             if (StringUtils.isEmpty(marathonAppId)) {
                 log.warn("Skipping on empty Marathon application ID");
                 continue;
@@ -139,21 +140,36 @@ public class MesosMembershipScheme implements HazelcastMembershipScheme {
                             marathonAppId));
                     continue;
                 }
-                int hazelcastPort = Integer.parseInt(mesosDNSSRVRecords.get(0).getPort());
-                String hazelcastIp = mesosDNSSRVRecords.get(0).getIp();
                 // Mesos DNS API does not return an ordered list. Therefore need to search for the Hazelcast port by
                 // iterating the list and taking the record with lowest numerical port value. By convention we define
-                // Hazelcast port as the first port mapping hence it should get the lowest numerical port value
+                // Hazelcast port as the first port mapping hence it should get the lowest numerical port value.
+                // If there are multiple members the lowest port can be another port than self lowest port. so we have
+                // to list the lowest port for each host and add all the members to the hazelcast map to ensure every
+                // member is included in the cluster. Otherwise some members can be missed.
+
+                HashMap<String,MesosDNSSRVRecord> selectedRecords = new HashMap<String, MesosDNSSRVRecord>();
+
                 for (MesosDNSSRVRecord mesosDNSSRVRecord : mesosDNSSRVRecords) {
-                    int port = Integer.parseInt(mesosDNSSRVRecord.getPort());
-                    if (hazelcastPort > port) {
-                        hazelcastPort = port;
-                        hazelcastIp = mesosDNSSRVRecord.getIp();
+                    if(selectedRecords.keySet().contains(mesosDNSSRVRecord.getHost())) {
+                        if(Integer.parseInt(selectedRecords.get(mesosDNSSRVRecord.getHost()).getPort())
+                                > Integer.parseInt(mesosDNSSRVRecord.getPort())){
+                            selectedRecords.put(mesosDNSSRVRecord.getHost(), mesosDNSSRVRecord);
+                        }
+                    } else {
+                        selectedRecords.put(mesosDNSSRVRecord.getHost(), mesosDNSSRVRecord);
                     }
                 }
-                String memberAddress = hazelcastIp + ":" + hazelcastPort;
-                nwConfig.getJoin().getTcpIpConfig().addMember(memberAddress);
-                log.info(String.format("Member added to cluster configuration: [Address] %s", memberAddress));
+
+                for(String host : selectedRecords.keySet()){
+                    MesosDNSSRVRecord record = selectedRecords.get(host);
+                    String memberAddress = record.getIp() + ":" + record.getPort();
+                    if(!nwConfig.getJoin().getTcpIpConfig().getMembers().contains(memberAddress)) {
+                        nwConfig.getJoin().getTcpIpConfig().addMember(memberAddress);
+                        log.info(String.format("Member added to cluster configuration: [Address] " +
+                                "%s", memberAddress));
+                    }
+                }
+
             } catch (MesosException e) {
                 handleMesosException(e, marathonAppId);
             }
